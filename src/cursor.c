@@ -70,14 +70,6 @@ static void Cursor_FreeInternal(Cursor *cur, khiter_t khi) {
     Cursor_FreeExecState(cur->execState);
     cur->execState = NULL;
   }
-  RedisModuleCtx *thctx = cur->sctx->redisCtx;
-  cur->sctx->redisCtx = NULL;
-  SearchCtx_Decref(cur->sctx);
-  cur->sctx = NULL;
-
-  if (thctx) {
-    RedisModule_FreeThreadSafeContext(thctx);
-  }
   rm_free(cur);
 }
 
@@ -190,8 +182,8 @@ static uint64_t CursorList_GenerateId(CursorList *curlist) {
   return id;
 }
 
-Cursor *Cursors_Reserve(CursorList *cl, RedisSearchCtx *sctx, const char *lookupName,
-                        unsigned interval, QueryError *status) {
+Cursor *Cursors_Reserve(CursorList *cl, const char *lookupName, unsigned interval,
+                        QueryError *status) {
   CursorList_Lock(cl);
   CursorList_IncrCounter(cl);
   CursorSpecInfo *spec = findInfo(cl, lookupName, NULL);
@@ -215,7 +207,6 @@ Cursor *Cursors_Reserve(CursorList *cl, RedisSearchCtx *sctx, const char *lookup
   cur = rm_calloc(1, sizeof(*cur));
   cur->parent = cl;
   cur->specInfo = spec;
-  cur->sctx = SearchCtx_Incref(sctx);
   cur->id = CursorList_GenerateId(cl);
   cur->pos = -1;
   cur->timeoutIntervalMs = interval;
@@ -342,4 +333,25 @@ void Cursors_PurgeWithName(CursorList *cl, const char *lookupName) {
     return;
   }
   Cursors_ForEach(cl, purgeCb, info);
+}
+
+void CursorList_Destroy(CursorList *cl) {
+  Cursors_GCInternal(cl, 1);
+  for (khiter_t ii = 0; ii != kh_end(cl->lookup); ++ii) {
+    if (!kh_exist(cl->lookup, ii)) {
+      continue;
+    }
+    Cursor *c = kh_val(cl->lookup, ii);
+    fprintf(stderr, "[redisearch] leaked cursor at %p\n", c);
+    Cursor_FreeInternal(c, ii);
+  }
+  kh_destroy(cursors, cl->lookup);
+
+  for (size_t ii = 0; ii < cl->specsCount; ++ii) {
+    CursorSpecInfo *sp = cl->specs[ii];
+    free(sp->keyName);
+    free(sp);
+  }
+  free(cl->specs);
+  pthread_mutex_destroy(&cl->lock);
 }

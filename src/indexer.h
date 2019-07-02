@@ -7,14 +7,12 @@
 #include "concurrent_ctx.h"
 #include "util/arr.h"
 // Preprocessors can store field data to this location
-typedef union FieldData {
+typedef struct FieldIndexerData {
   double numeric;  // i.e. the numeric value of the field
-  struct {
-    char *slon;
-    char *slat;
-  } geo;  // lon/lat pair
+  const char *geoSlon;
+  const char *geoSlat;
   char **tags;
-} fieldData;
+} FieldIndexerData;
 
 typedef struct DocumentIndexer {
   RSAddDocumentCtx *head;          // first item in the queue
@@ -25,24 +23,21 @@ typedef struct DocumentIndexer {
   ConcurrentSearchCtx concCtx;     // GIL locking. This is repopulated with the relevant key data
   RedisModuleCtx *redisCtx;        // Context for keeping the spec key
   RedisModuleString *specKeyName;  // Cached, used for opening/closing the spec key.
+  uint64_t specId;                 // Unique spec ID. Used to verify we haven't been replaced
   int isDbSelected;
-
-  char *name;  // The name of the index this structure belongs to. For use with the list of indexers
   struct DocumentIndexer *next;  // Next structure in the indexer list
   KHTable mergeHt;               // Hashtable and block allocator for merging
   BlkAlloc alloc;
   int options;
+  pthread_t thr;
 } DocumentIndexer;
 
 #define INDEXER_THREADLESS 0x01
+// Set when the indexer is about to be deleted
+#define INDEXER_DELETING 0x02
 
-void DropDocumentIndexer(const char *specname);
-
-/**
- * Get the indexing thread for the given spec `specname`. If no such thread is
- * running, a new one will be instantiated.
- */
-DocumentIndexer *GetDocumentIndexer(const char *specname, int options);
+void Indexer_Free(DocumentIndexer *indexer);
+DocumentIndexer *NewIndexer(IndexSpec *spec);
 
 /**
  * Add a document to the indexing queue. If successful, the indexer now takes
@@ -60,34 +55,27 @@ int Indexer_Add(DocumentIndexer *indexer, RSAddDocumentCtx *aCtx);
  * This function is called with the GIL released.
  */
 typedef int (*PreprocessorFunc)(RSAddDocumentCtx *aCtx, const DocumentField *field,
-                                const FieldSpec *fs, fieldData *fdata, QueryError *status);
+                                const FieldSpec *fs, FieldIndexerData *fdata, QueryError *status);
 
 /**
  * Function to write the entry for the field into the actual index. This is called
  * with the GIL locked, and it should therefore only write data, and nothing more.
  */
 typedef int (*IndexerFunc)(RSAddDocumentCtx *aCtx, RedisSearchCtx *ctx, const DocumentField *field,
-                           const FieldSpec *fs, fieldData *fdata, QueryError *status);
-
-/**
- * Get the preprocessor function for a given index type
- */
-PreprocessorFunc GetIndexPreprocessor(const FieldType ft);
+                           const FieldSpec *fs, FieldIndexerData *fdata, QueryError *status);
 
 typedef struct {
-  RedisModuleKey *indexKey;
-  void *indexData;
-  int initialized;
-  int type;
+  RedisModuleKey *indexKeys[INDEXFLD_NUM_TYPES];
+  void *indexDatas[INDEXFLD_NUM_TYPES];
+  FieldType typemask;
+  int found;
 } IndexBulkData;
 
-typedef struct {
-  void (*BulkInit)(IndexBulkData *bulk, const FieldSpec *fs, RedisSearchCtx *sctx);
-  int (*BulkAdd)(IndexBulkData *bulk, RSAddDocumentCtx *aCtx, RedisSearchCtx *ctx,
-                 DocumentField *field, const FieldSpec *fs, fieldData *fdata, QueryError *status);
-  void (*BulkDone)(IndexBulkData *bulk, RedisSearchCtx *ctx);
-} BulkIndexer;
+// IndexerBulkAdd(bulk, cur, sctx, doc->fields + ii, fs, fdata, &cur->status);
 
-const BulkIndexer *GetBulkIndexer(const FieldType ft);
+int IndexerBulkAdd(IndexBulkData *bulk, RSAddDocumentCtx *cur, RedisSearchCtx *sctx,
+                   const DocumentField *field, const FieldSpec *fs, FieldIndexerData *fdata,
+                   QueryError *status);
+void IndexerBulkCleanup(IndexBulkData *cur, RedisSearchCtx *sctx);
 
 #endif

@@ -16,6 +16,8 @@
 extern "C" {
 #endif
 
+extern uint64_t TotalIIBlocks;
+
 /* A single block of data in the index. The index is basically a list of blocks we iterate */
 typedef struct {
   t_docId firstId;
@@ -87,12 +89,30 @@ int InvertedIndex_Repair(InvertedIndex *idx, DocTable *dt, uint32_t startBlock,
  */
 typedef int (*IndexDecoder)(BufferReader *br, const IndexDecoderCtx *ctx, RSIndexResult *res);
 
+struct IndexReader;
+/**
+ * Custom implementation of a seeking function. Seek to the specific ID within
+ * the index, or at one position after it.
+ *
+ * The implementation of this function is optional. If this is not used, then
+ * the decoder() implementation will be used instead.
+ */
+typedef int (*IndexSeeker)(BufferReader *br, const IndexDecoderCtx *ctx, struct IndexReader *ir,
+                           t_docId to, RSIndexResult *res);
+
+typedef struct {
+  IndexDecoder decoder;
+  IndexSeeker seeker;
+} IndexDecoderProcs;
+
 /* Get the decoder for the index based on the index flags. This is used to externally inject the
  * endoder/decoder when reading and writing */
-IndexDecoder InvertedIndex_GetDecoder(uint32_t flags);
+IndexDecoderProcs InvertedIndex_GetDecoder(uint32_t flags);
 
 /* An IndexReader wraps an inverted index record for reading and iteration */
-typedef struct indexReadCtx {
+typedef struct IndexReader {
+  const IndexSpec *sp;
+
   // the underlying data buffer
   BufferReader br;
 
@@ -105,7 +125,7 @@ typedef struct indexReadCtx {
    * filtering field masks, the pointer for numeric filtering */
   IndexDecoderCtx decoderCtx;
   /* The decoding function for reading the index */
-  IndexDecoder decoder;
+  IndexDecoderProcs decoders;
 
   /* The number of records read */
   size_t len;
@@ -148,7 +168,7 @@ size_t InvertedIndex_WriteEntryGeneric(InvertedIndex *idx, IndexEncoder encoder,
 /* Create a new index reader for numeric records, optionally using a given filter. If the filter
  * is
  * NULL we will return all the records in the index */
-IndexReader *NewNumericReader(InvertedIndex *idx, const NumericFilter *flt);
+IndexReader *NewNumericReader(const IndexSpec *sp, InvertedIndex *idx, const NumericFilter *flt);
 
 /* Get the appropriate encoder for an inverted index given its flags. Returns NULL on invalid flags
  */
@@ -159,7 +179,7 @@ IndexEncoder InvertedIndex_GetEncoder(IndexFlags flags);
  * If singleWordMode is set to 1, we ignore the skip index and use the score
  * index.
  */
-IndexReader *NewTermIndexReader(InvertedIndex *idx, DocTable *docTable, t_fieldMask fieldMask,
+IndexReader *NewTermIndexReader(InvertedIndex *idx, IndexSpec *sp, t_fieldMask fieldMask,
                                 RSQueryTerm *term, double weight);
 
 /* free an index reader */
@@ -175,8 +195,17 @@ int IR_Read(void *ctx, RSIndexResult **e);
  */
 int IR_Next(void *ctx);
 
-/* Skip to a specific docId in a reader,using the skip index, and read the entry
- * there */
+/**
+ * Skip to a specific document ID in the index, or one position after it
+ * @param ctx the index reader
+ * @param docId the document ID to search for
+ * @param hit where to store the result pointer
+ *
+ * @return:
+ *  - INDEXREAD_OK if the id was found
+ *  - INDEXREAD_NOTFOUND if the reader is at the next position
+ *  - INDEXREAD_EOF if the ID is out of the upper range
+ */
 int IR_SkipTo(void *ctx, t_docId docId, RSIndexResult **hit);
 
 RSIndexResult *IR_Current(void *ctx);
@@ -186,9 +215,6 @@ size_t IR_NumDocs(void *ctx);
 
 /* LastDocId of an inverted index stateful reader */
 t_docId IR_LastDocId(void *ctx);
-
-/* Seek the inverted index reader to a specific offset and set the last docId */
-void IR_Seek(IndexReader *ir, t_offset offset, t_docId docId);
 
 /* Create a reader iterator that iterates an inverted index record */
 IndexIterator *NewReadIterator(IndexReader *ir);

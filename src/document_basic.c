@@ -1,15 +1,25 @@
 #include "document.h"
 #include "stemmer.h"
+#include "rmalloc.h"
 
 void Document_Init(Document *doc, RedisModuleString *docKey, double score, int numFields,
                    const char *lang, const char *payload, size_t payloadSize) {
   doc->docKey = docKey;
   doc->score = (float)score;
   doc->numFields = numFields;
-  doc->fields = calloc(doc->numFields, sizeof(DocumentField));
+  doc->fields = numFields ? calloc(doc->numFields, sizeof(DocumentField)) : NULL;
   doc->language = lang;
   doc->payload = payload;
   doc->payloadSize = payloadSize;
+}
+
+void Document_AddField(Document *d, const char *fieldname, RedisModuleString *fieldval,
+                       uint32_t typemask) {
+  d->fields = realloc(d->fields, (++d->numFields) * sizeof(*d->fields));
+  DocumentField *f = d->fields + d->numFields - 1;
+  f->indexAs = typemask;
+  f->name = strdup(fieldname);  // free_detached called on this later on..
+  f->text = fieldval;
 }
 
 void Document_PrepareForAdd(Document *doc, RedisModuleString *docKey, double score,
@@ -56,7 +66,6 @@ void Document_ClearDetachedFields(Document *doc, RedisModuleCtx *anyCtx) {
 
 void Document_Detach(Document *doc, RedisModuleCtx *srcCtx) {
   RedisModule_RetainString(srcCtx, doc->docKey);
-  doc->stringOwner = 1;
 
   Document_DetachFields(doc, srcCtx);
   if (doc->payload) {
@@ -82,8 +91,7 @@ void Document_FreeDetached(Document *doc, RedisModuleCtx *anyCtx) {
   Document_Free(doc);
 }
 
-int Redis_SaveDocument(RedisSearchCtx *ctx, Document *doc, QueryError *status) {
-
+int Redis_SaveDocument(RedisSearchCtx *ctx, Document *doc, int options, QueryError *status) {
   RedisModuleKey *k =
       RedisModule_OpenKey(ctx->redisCtx, doc->docKey, REDISMODULE_WRITE | REDISMODULE_READ);
   if (k == NULL || (RedisModule_KeyType(k) != REDISMODULE_KEYTYPE_EMPTY &&
@@ -92,6 +100,11 @@ int Redis_SaveDocument(RedisSearchCtx *ctx, Document *doc, QueryError *status) {
     if (k) {
       RedisModule_CloseKey(k);
     }
+    return REDISMODULE_ERR;
+  }
+  if ((options & REDIS_SAVEDOC_NOCREATE) && RedisModule_KeyType(k) == REDISMODULE_KEYTYPE_EMPTY) {
+    RedisModule_CloseKey(k);
+    QueryError_SetError(status, QUERY_ENODOC, "Document does not exist");
     return REDISMODULE_ERR;
   }
 

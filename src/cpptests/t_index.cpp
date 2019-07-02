@@ -445,7 +445,7 @@ TEST_F(IndexTest, testNumericInverted) {
 
   // printf("written %zd bytes\n", IndexBlock_DataLen(&idx->blocks[0]));
 
-  IndexReader *ir = NewNumericReader(idx, NULL);
+  IndexReader *ir = NewNumericReader(NULL, idx, NULL);
   IndexIterator *it = NewReadIterator(ir);
   RSIndexResult *res;
   t_docId i = 1;
@@ -473,7 +473,7 @@ TEST_F(IndexTest, testNumericVaried) {
     // printf("[%lu]: Stored %lf\n", i, nums[i]);
   }
 
-  IndexReader *ir = NewNumericReader(idx, NULL);
+  IndexReader *ir = NewNumericReader(NULL, idx, NULL);
   IndexIterator *it = NewReadIterator(ir);
   RSIndexResult *res;
 
@@ -535,7 +535,7 @@ TEST_F(IndexTest, testNumericEncoding) {
     ASSERT_EQ(infos[ii].size, sz);
   }
 
-  IndexReader *ir = NewNumericReader(idx, NULL);
+  IndexReader *ir = NewNumericReader(NULL, idx, NULL);
   IndexIterator *it = NewReadIterator(ir);
   RSIndexResult *res;
 
@@ -591,7 +591,7 @@ TEST_F(IndexTest, testIntersection) {
 
   RSIndexResult *h = NULL;
 
-  float topFreq = 0;
+  uint32_t topFreq = 0;
   while (ii->Read(ii->ctx, &h) != INDEXREAD_EOF) {
     ASSERT_EQ(h->type, RSResultType_Intersection);
     ASSERT_TRUE(RSIndexResult_IsAggregate(h));
@@ -605,9 +605,9 @@ TEST_F(IndexTest, testIntersection) {
 
     ASSERT_TRUE(copy->docId == h->docId);
     ASSERT_TRUE(copy->type == RSResultType_Intersection);
-
+    ASSERT_EQ((count * 2 + 2) * 2, h->docId);
+    ASSERT_EQ(count * 2 + 2, h->freq);
     IndexResult_Free(copy);
-
     ++count;
   }
 
@@ -733,47 +733,45 @@ TEST_F(IndexTest, testIndexSpec) {
 
   const FieldSpec *f = IndexSpec_GetField(s, body, strlen(body));
   ASSERT_TRUE(f != NULL);
-  ASSERT_TRUE(f->type == FIELD_FULLTEXT);
-  ASSERT_TRUE(strcmp(f->name, body) == 0);
-  ASSERT_TRUE(f->textOpts.weight == 2.0);
+  ASSERT_TRUE(FIELD_IS(f, INDEXFLD_T_FULLTEXT));
+  ASSERT_STREQ(f->name, body);
+  ASSERT_EQ(f->ftWeight, 2.0);
   ASSERT_EQ(FIELD_BIT(f), 2);
-  ASSERT_TRUE(f->options == 0);
-  ASSERT_TRUE(f->sortIdx == -1);
+  ASSERT_EQ(f->options, 0);
+  ASSERT_EQ(f->sortIdx, -1);
 
   f = IndexSpec_GetField(s, title, strlen(title));
   ASSERT_TRUE(f != NULL);
-  ASSERT_TRUE(f->type == FIELD_FULLTEXT);
+  ASSERT_TRUE(FIELD_IS(f, INDEXFLD_T_FULLTEXT));
   ASSERT_TRUE(strcmp(f->name, title) == 0);
-  ASSERT_TRUE(f->textOpts.weight == 0.1);
+  ASSERT_TRUE(f->ftWeight == 0.1);
   ASSERT_TRUE(FIELD_BIT(f) == 1);
   ASSERT_TRUE(f->options == 0);
   ASSERT_TRUE(f->sortIdx == -1);
 
   f = IndexSpec_GetField(s, foo, strlen(foo));
   ASSERT_TRUE(f != NULL);
-  ASSERT_TRUE(f->type == FIELD_FULLTEXT);
+  ASSERT_TRUE(FIELD_IS(f, INDEXFLD_T_FULLTEXT));
   ASSERT_TRUE(strcmp(f->name, foo) == 0);
-  ASSERT_TRUE(f->textOpts.weight == 1);
+  ASSERT_TRUE(f->ftWeight == 1);
   ASSERT_TRUE(FIELD_BIT(f) == 4);
   ASSERT_TRUE(f->options == FieldSpec_Sortable);
   ASSERT_TRUE(f->sortIdx == 0);
 
   f = IndexSpec_GetField(s, bar, strlen(bar));
   ASSERT_TRUE(f != NULL);
-  ASSERT_TRUE(f->type == FIELD_NUMERIC);
+  ASSERT_TRUE(FIELD_IS(f, INDEXFLD_T_NUMERIC));
 
   ASSERT_TRUE(strcmp(f->name, bar) == 0);
-  ASSERT_TRUE(f->textOpts.weight == 0);
-  ASSERT_TRUE(FIELD_BIT(f) == 1);
   ASSERT_TRUE(f->options == FieldSpec_Sortable);
   ASSERT_TRUE(f->sortIdx == 1);
   ASSERT_TRUE(IndexSpec_GetField(s, "fooz", 4) == NULL);
 
   f = IndexSpec_GetField(s, name, strlen(name));
   ASSERT_TRUE(f != NULL);
-  ASSERT_TRUE(f->type == FIELD_FULLTEXT);
+  ASSERT_TRUE(FIELD_IS(f, INDEXFLD_T_FULLTEXT));
   ASSERT_TRUE(strcmp(f->name, name) == 0);
-  ASSERT_TRUE(f->textOpts.weight == 1);
+  ASSERT_TRUE(f->ftWeight == 1);
   ASSERT_TRUE(FIELD_BIT(f) == 8);
   ASSERT_TRUE(f->options == FieldSpec_NoStemming);
   ASSERT_TRUE(f->sortIdx == -1);
@@ -803,8 +801,7 @@ TEST_F(IndexTest, testIndexSpec) {
   IndexSpec_Free(s);
 
   // User-reported bug
-  const char *args3[] = {"mySpec", "SCHEMA", "ha", "NUMERIC", "hb",
-                         "TEXT",   "WEIGHT", "1",  "NOSTEM"};
+  const char *args3[] = {"SCHEMA", "ha", "NUMERIC", "hb", "TEXT", "WEIGHT", "1", "NOSTEM"};
   QueryError_ClearError(&err);
   s = IndexSpec_Parse("idx", args3, sizeof(args3) / sizeof(args3[0]), &err);
   ASSERT_FALSE(QueryError_HasError(&err)) << QueryError_GetError(&err);
@@ -814,10 +811,9 @@ TEST_F(IndexTest, testIndexSpec) {
 }
 
 static void fillSchema(std::vector<char *> &args, size_t nfields) {
-  args.resize(2 + nfields * 3);
-  args[0] = strdup("mySpec");
-  args[1] = strdup("SCHEMA");
-  size_t n = 2;
+  args.resize(1 + nfields * 3);
+  args[0] = strdup("SCHEMA");
+  size_t n = 1;
   for (unsigned i = 0; i < nfields; i++) {
     asprintf(&args[n++], "field%u", i);
     if (i % 2 == 0) {

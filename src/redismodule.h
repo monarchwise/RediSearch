@@ -136,6 +136,7 @@ typedef struct RedisModuleTypeMethods {
 
 #define REDISMODULE_API_FUNC(T, N) extern T(*N)
 
+REDISMODULE_API_FUNC(int, RedisModule_GetApi)(const char *, void *);
 REDISMODULE_API_FUNC(void *, RedisModule_Alloc)(size_t bytes);
 REDISMODULE_API_FUNC(void *, RedisModule_Realloc)(void *ptr, size_t bytes);
 REDISMODULE_API_FUNC(void, RedisModule_Free)(void *ptr);
@@ -289,9 +290,13 @@ REDISMODULE_API_FUNC(RedisModuleCtx *, RedisModule_GetThreadSafeContext)
 REDISMODULE_API_FUNC(void, RedisModule_FreeThreadSafeContext)(RedisModuleCtx *ctx);
 REDISMODULE_API_FUNC(void, RedisModule_ThreadSafeContextLock)(RedisModuleCtx *ctx);
 REDISMODULE_API_FUNC(void, RedisModule_ThreadSafeContextUnlock)(RedisModuleCtx *ctx);
+REDISMODULE_API_FUNC(int, RedisModule_ExportSharedAPI)
+(RedisModuleCtx *ctx, const char *name, void *fn);
+REDISMODULE_API_FUNC(void *, RedisModule_GetSharedAPI)(RedisModuleCtx *, const char *);
 #endif
 
 #define REDISMODULE_XAPI_STABLE(X) \
+  X(GetApi)                        \
   X(Alloc)                         \
   X(Calloc)                        \
   X(Free)                          \
@@ -404,7 +409,9 @@ REDISMODULE_API_FUNC(void, RedisModule_ThreadSafeContextUnlock)(RedisModuleCtx *
   X(IsBlockedReplyRequest)               \
   X(IsBlockedTimeoutRequest)             \
   X(GetBlockedClientPrivateData)         \
-  X(AbortBlock)
+  X(AbortBlock)                          \
+  X(ExportSharedAPI)                     \
+  X(GetSharedAPI)
 
 #ifdef REDISMODULE_EXPERIMENTAL_API
 #define REDISMODULE_XAPI(X) REDISMODULE_XAPI_STABLE(X) REDISMODULE_XAPI_EXPERIMENTAL(X)

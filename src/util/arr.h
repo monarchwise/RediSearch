@@ -59,6 +59,8 @@ typedef void *array_t;
 /* Interanl - get a pointer to an element inside the array at a given index */
 #define array_elem(arr, idx) (*((void **)((char *)arr + (idx * array_hdr(arr)->elem_sz))))
 
+static inline uint32_t array_len(array_t arr);
+
 /* Initialize a new array with a given element size and capacity. Should not be used directly - use
  * array_new instead */
 static array_t array_new_sz(uint32_t elem_sz, uint32_t cap, uint32_t len) {
@@ -101,6 +103,14 @@ static inline array_t array_grow(array_t arr, size_t n) {
   return array_ensure_cap(arr, array_hdr(arr)->len);
 }
 
+static inline array_t array_ensure_len(array_t arr, size_t len) {
+  if (len <= array_len(arr)) {
+    return arr;
+  }
+  len -= array_len(arr);
+  return array_grow(arr, len);
+}
+
 /* Ensures that array_tail will always point to a valid element. */
 #define array_ensure_tail(arrpp, T)            \
   ({                                           \
@@ -112,6 +122,15 @@ static inline array_t array_grow(array_t arr, size_t n) {
     &(array_tail(*(arrpp)));                   \
   })
 
+/**
+ * Appends elements to the end of the array, creating the array if it does
+ * not exist
+ * @param arrpp array pointer. Can be NULL
+ * @param src array (i.e. C array) of elements to append
+ * @param n length of sec
+ * @param T type of the array (for sizeof)
+ * @return the array
+ */
 #define array_ensure_append(arrpp, src, n, T)      \
   ({                                               \
     size_t a__oldlen = 0;                          \
@@ -123,6 +142,24 @@ static inline array_t array_grow(array_t arr, size_t n) {
     }                                              \
     memcpy(arrpp + a__oldlen, src, n * sizeof(T)); \
     arrpp;                                         \
+  })
+
+/**
+ * Does the same thing as ensure_append, but the added elements are
+ * at the _beginning_ of the array
+ */
+#define array_ensure_prepend(arrpp, src, n, T)                          \
+  ({                                                                    \
+    size_t a__oldlen = 0;                                               \
+    if (!arrpp) {                                                       \
+      arrpp = array_newlen(T, n);                                       \
+    } else {                                                            \
+      a__oldlen = array_len(arrpp);                                     \
+      arrpp = (T *)array_grow(arrpp, n);                                \
+    }                                                                   \
+    memmove(((char *)arrpp) + sizeof(T), arrpp, a__oldlen * sizeof(T)); \
+    memcpy(arrpp, src, n * sizeof(T));                                  \
+    arrpp;                                                              \
   })
 
 /*
@@ -188,8 +225,13 @@ static inline void *array_trimm(array_t arr, uint32_t len, uint32_t cap) {
 
 /* Free the array, without dealing with individual elements */
 static void array_free(array_t arr) {
-  array_free_fn(array_hdr(arr));
+  if (arr != NULL) {
+    // like free(), shouldn't explode if NULL
+    array_free_fn(array_hdr(arr));
+  }
 }
+
+#define array_clear(arr) array_hdr(arr)->len = 0
 
 /* Repeate the code in "blk" for each element in the array, and give it the name of "as".
  * e.g:
@@ -222,6 +264,27 @@ static void array_free(array_t arr) {
   ({                                 \
     assert(array_hdr(arr)->len > 0); \
     arr[--(array_hdr(arr)->len)];    \
+  })
+
+/* Remove a specified element from the array */
+#define array_del(arr, ix)                                                        \
+  ({                                                                              \
+    assert(array_len(arr) > ix);                                                  \
+    if (array_len(arr) - 1 > ix) {                                                \
+      memcpy(arr + ix, arr + ix + 1, sizeof(*arr) * (array_len(arr) - (ix + 1))); \
+    }                                                                             \
+    --array_hdr(arr)->len;                                                        \
+    arr;                                                                          \
+  })
+
+/* Remove a specified element from the array, but does not preserve order */
+#define array_del_fast(arr, ix)          \
+  ({                                     \
+    if (array_len(arr) > 1) {            \
+      arr[ix] = arr[array_len(arr) - 1]; \
+    }                                    \
+    --array_hdr(arr)->len;               \
+    arr;                                 \
   })
 
 #ifdef __cplusplus

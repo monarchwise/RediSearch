@@ -1,9 +1,3 @@
-/*
- * spell_check.h
- *
- *  Created on: Jul 12, 2018
- *      Author: meir
- */
 
 #ifndef SRC_SPELL_CHECK_H_
 #define SRC_SPELL_CHECK_H_
@@ -29,6 +23,7 @@ typedef struct SpellCheckCtx {
   const char **excludeDict;
   long long distance;
   bool fullScoreInfo;
+  size_t results;
 } SpellCheckCtx;
 
 RS_Suggestions *RS_SuggestionsCreate();

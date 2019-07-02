@@ -41,13 +41,14 @@ static void ReplyReaderResults(IndexReader *reader, RedisModuleCtx *ctx) {
   ReadIterator_Free(iter);
 }
 
-static RedisModuleString *getFieldKeyName(IndexSpec *spec, RedisModuleString *fieldNameRS) {
+static RedisModuleString *getFieldKeyName(IndexSpec *spec, RedisModuleString *fieldNameRS,
+                                          FieldType t) {
   const char *fieldName = RedisModule_StringPtrLen(fieldNameRS, NULL);
   const FieldSpec *fieldSpec = IndexSpec_GetField(spec, fieldName, strlen(fieldName));
   if (!fieldSpec) {
     return NULL;
   }
-  return IndexSpec_GetFormattedKey(spec, fieldSpec);
+  return IndexSpec_GetFormattedKey(spec, fieldSpec, t);
 }
 
 DEBUG_COMMAND(DumpTerms) {
@@ -154,7 +155,7 @@ DEBUG_COMMAND(NumericIndexSummary) {
   }
   GET_SEARCH_CTX(argv[0])
   RedisModuleKey *keyp = NULL;
-  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1]);
+  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1], INDEXFLD_T_NUMERIC);
   if (!keyName) {
     RedisModule_ReplyWithError(sctx->redisCtx, "Could not find given field in index spec");
     goto end;
@@ -189,7 +190,7 @@ DEBUG_COMMAND(DumpNumericIndex) {
   }
   GET_SEARCH_CTX(argv[0])
   RedisModuleKey *keyp = NULL;
-  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1]);
+  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1], INDEXFLD_T_NUMERIC);
   if (!keyName) {
     RedisModule_ReplyWithError(sctx->redisCtx, "Could not find given field in index spec");
     goto end;
@@ -205,7 +206,7 @@ DEBUG_COMMAND(DumpNumericIndex) {
   RedisModule_ReplyWithArray(sctx->redisCtx, REDISMODULE_POSTPONED_ARRAY_LEN);
   while ((currNode = NumericRangeTreeIterator_Next(iter))) {
     if (currNode->range) {
-      IndexReader *reader = NewNumericReader(currNode->range->entries, NULL);
+      IndexReader *reader = NewNumericReader(NULL, currNode->range->entries, NULL);
       ReplyReaderResults(reader, sctx->redisCtx);
       ++resultSize;
     }
@@ -226,12 +227,12 @@ DEBUG_COMMAND(DumpTagIndex) {
   }
   GET_SEARCH_CTX(argv[0])
   RedisModuleKey *keyp = NULL;
-  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1]);
+  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1], INDEXFLD_T_TAG);
   if (!keyName) {
     RedisModule_ReplyWithError(sctx->redisCtx, "Could not find given field in index spec");
     goto end;
   }
-  TagIndex *tagIndex = TagIndex_Open(sctx->redisCtx, keyName, false, &keyp);
+  TagIndex *tagIndex = TagIndex_Open(sctx, keyName, false, &keyp);
   if (!tagIndex) {
     RedisModule_ReplyWithError(sctx->redisCtx, "can not open tag field");
     goto end;
@@ -395,13 +396,13 @@ DEBUG_COMMAND(InfoTagIndex) {
     goto end;
   }
 
-  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1]);
+  RedisModuleString *keyName = getFieldKeyName(sctx->spec, argv[1], INDEXFLD_T_TAG);
   if (!keyName) {
     RedisModule_ReplyWithError(sctx->redisCtx, "Could not find given field in index spec");
     goto end;
   }
 
-  const TagIndex *idx = TagIndex_Open(sctx->redisCtx, keyName, false, &keyp);
+  const TagIndex *idx = TagIndex_Open(sctx, keyName, false, &keyp);
   if (!idx) {
     RedisModule_ReplyWithError(sctx->redisCtx, "can not open tag field");
     goto end;

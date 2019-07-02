@@ -96,6 +96,20 @@ CONFIG_GETTER(getMinPrefix) {
   return sdscatprintf(ss, "%lld", config->minTermPrefix);
 }
 
+CONFIG_SETTER(setForkGCSleep) {
+  long long arg;
+  if (readLongLongLimit(argv, argc, offset, &arg, 1, LLONG_MAX) != REDISMODULE_OK) {
+    return REDISMODULE_ERR;
+  }
+  config->forkGcSleepBeforeExit = arg;
+  return REDISMODULE_OK;
+}
+
+CONFIG_GETTER(getForkGCSleep) {
+  sds ss = sdsempty();
+  return sdscatprintf(ss, "%zu", config->forkGcSleepBeforeExit);
+}
+
 // MAXDOCTABLESIZE
 CONFIG_SETTER(setMaxDocTableSize) {
   long long size;
@@ -229,7 +243,7 @@ CONFIG_SETTER(setForkGcInterval) {
 
 CONFIG_GETTER(getForkGcInterval) {
   sds ss = sdsempty();
-  return sdscatprintf(ss, "%lu", config->forkGcRunIntervalSec);
+  return sdscatprintf(ss, "%u", config->forkGcRunIntervalSec);
 }
 
 CONFIG_SETTER(setMinPhoneticTermLen) {
@@ -330,11 +344,16 @@ RSConfigOptions RSGlobalConfigOptions = {
          .helpText = "Disable garbage collection (for this process)",
          .setValue = setNoGc,
          .getValue = getNoGc,
-         .flags = RSCONFIGVAR_F_FLAG},
+         .flags = RSCONFIGVAR_F_FLAG | RSCONFIGVAR_F_IMMUTABLE},
         {.name = "MINPREFIX",
          .helpText = "Set the minimum prefix for expansions (`*`)",
          .setValue = setMinPrefix,
          .getValue = getMinPrefix},
+        {.name = "FORKGC_SLEEP_BEFORE_EXIT",
+         .helpText = "set the amount of seconds for the fork GC to sleep before exists, should "
+                     "always be set to 0 (other then on tests).",
+         .setValue = setForkGCSleep,
+         .getValue = getForkGCSleep},
         {.name = "MAXDOCTABLESIZE",
          .helpText = "Maximum runtime document table size (for this process)",
          .setValue = setMaxDocTableSize,
@@ -387,8 +406,7 @@ RSConfigOptions RSGlobalConfigOptions = {
         {.name = "FORK_GC_RUN_INTERVAL",
          .helpText = "interval in which to run the fork gc (relevant only when fork gc is used)",
          .setValue = setForkGcInterval,
-         .getValue = getForkGcInterval,
-         .flags = RSCONFIGVAR_F_IMMUTABLE},
+         .getValue = getForkGcInterval},
         {.name = NULL}}};
 
 void RSConfigOptions_AddConfigs(RSConfigOptions *src, RSConfigOptions *dst) {
@@ -504,7 +522,7 @@ RSTimeoutPolicy TimeoutPolicy_Parse(const char *s, size_t n) {
   if (!strncasecmp(s, "RETURN", n)) {
     return TimeoutPolicy_Return;
   } else if (!strncasecmp(s, "FAIL", n)) {
-    return TimeoutPolicy_Return;
+    return TimeoutPolicy_Fail;
   } else {
     return TimeoutPolicy_Invalid;
   }

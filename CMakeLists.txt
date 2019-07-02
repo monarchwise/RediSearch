@@ -6,6 +6,9 @@ INCLUDE(cmake/redisearch_cflags.cmake)
 CMAKE_POLICY(SET CMP0026 OLD)
 
 OPTION(RS_RUN_TESTS "Build & Run RediSearch's tests" OFF)
+OPTION(RS_BUILD_STATIC "Builds a static library" OFF)
+OPTION(USE_ASAN "Use AddressSanitizer (clang)" OFF)
+OPTION(USE_MSAN "Use MemorySanitizer (clang)" OFF)
 
 ADD_DEFINITIONS(-UNDEBUG)
 
@@ -78,24 +81,33 @@ SET(FINAL_OBJECTS
     $<TARGET_OBJECTS:rmutil>
     $<TARGET_OBJECTS:friso>
     $<TARGET_OBJECTS:snowball>
-    $<TARGET_OBJECTS:metaphone>)
+    $<TARGET_OBJECTS:metaphone>
+    src/module-init/module-init.c)
 
-ADD_LIBRARY(redisearchS STATIC ${FINAL_OBJECTS})
-ADD_LIBRARY(redisearch SHARED ${FINAL_OBJECTS} src/module-init/module-init.c)
-ADD_EXECUTABLE(sizes src/c_utils/sizes.cpp)
-TARGET_LINK_LIBRARIES(sizes redisearch dl)
-
+ADD_LIBRARY(redisearch SHARED ${FINAL_OBJECTS})
+TARGET_LINK_LIBRARIES(redisearch dl m)
 SET_TARGET_PROPERTIES(redisearch PROPERTIES PREFIX "")
 SET_TARGET_PROPERTIES(redisearch PROPERTIES SUFFIX ".so")
-TARGET_LINK_LIBRARIES(redisearchS -lm -lc -ldl)
+
+IF (RS_BUILD_STATIC)
+    ADD_LIBRARY(redisearchS STATIC ${FINAL_OBJECTS})
+ENDIF()
+
+IF (APPLE) 
+    SET_TARGET_PROPERTIES(redisearch
+        PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
+ENDIF()
 
 IF (RS_RUN_TESTS)
-    SET(BUILD_GTEST ON CACHE BOOL "" FORCE)
-    SET(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    SET(BUILD_SHARED_LIBS ON CACHE BOOL "enable shared libs" FORCE)
+    SET(BUILD_GTEST ON CACHE BOOL "enable gtest" FORCE)
+    SET(BUILD_GMOCK OFF CACHE BOOL "disable gmock" FORCE)
     ADD_SUBDIRECTORY(src/dep/gtest)
     ADD_SUBDIRECTORY(src/cpptests)
     ADD_SUBDIRECTORY(src/tests)
     ADD_SUBDIRECTORY(src/pytest)
+ELSEIF (RS_ENABLE_MOCK)
+    ADD_SUBDIRECTORY(src/cpptests/redismock)
 ENDIF()
 
 # SET(RMTEST_MODULE_PATH $<TARGET_FILE:redisearch>)
@@ -106,3 +118,5 @@ GET_TARGET_PROPERTY(RMTEST_EXT_PATH example_extension LOCATION)
 
 CONFIGURE_FILE(cmake/rmtest.config.in
     ${PROJECT_BINARY_DIR}/rmtest.config.default)
+
+ADD_SUBDIRECTORY(src/c_utils)

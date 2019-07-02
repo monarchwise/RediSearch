@@ -1,35 +1,32 @@
 
 import unittest
+from RLTest import Env
 
 
 def testBasicGC(env):
     if env.isCluster():
         raise unittest.SkipTest()
     env.assertOk(env.cmd('ft.create', 'idx', 'schema', 'title', 'text', 'id', 'numeric', 't', 'tag'))
-    env.assertOk(env.cmd('ft.add', 'idx', 'doc1', 1.0, 'fields',
-                         'title', 'hello world',
-                         'id', '5',
-                         't', 'tag1'))
+    for i in range(101):
+        env.assertOk(env.cmd('ft.add', 'idx', 'doc%d' % i, 1.0, 'fields',
+                             'title', 'hello world',
+                             'id', '5',
+                             't', 'tag1'))
 
-    env.assertOk(env.cmd('ft.add', 'idx', 'doc2', 1.0, 'fields',
-                         'title', 'hello world 1',
-                         'id', '7',
-                         't', 'tag2'))
+    env.assertEqual(env.cmd('ft.debug', 'DUMP_INVIDX', 'idx', 'world'), [long(i) for i in range(1, 102)])
+    env.assertEqual(env.cmd('ft.debug', 'DUMP_NUMIDX', 'idx', 'id'), [[long(i) for i in range(1, 102)]])
+    env.assertEqual(env.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't'), [['tag1', [long(i) for i in range(1, 102)]]])
 
-    env.assertEqual(env.cmd('ft.debug', 'DUMP_INVIDX', 'idx', 'world'), [1, 2])
-    env.assertEqual(env.cmd('ft.debug', 'DUMP_NUMIDX', 'idx', 'id'), [[1, 2], [2], [1]])
-    env.assertEqual(env.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't'), [['tag1', [1]], ['tag2', [2]]])
-
-    env.assertEqual(env.cmd('ft.del', 'idx', 'doc2'), 1)
+    env.assertEqual(env.cmd('ft.del', 'idx', 'doc0'), 1)
 
     for i in range(100):
         # gc is random so we need to do it long enough times for it to work
         env.cmd('ft.debug', 'GC_FORCEINVOKE', 'idx')
 
     # check that the gc collected the deleted docs
-    env.assertEqual(env.cmd('ft.debug', 'DUMP_INVIDX', 'idx', 'world'), [1])
-    env.assertEqual(env.cmd('ft.debug', 'DUMP_NUMIDX', 'idx', 'id'), [[1], [], [1]])
-    env.assertEqual(env.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't'), [['tag1', [1]], ['tag2', []]])
+    env.assertEqual(env.cmd('ft.debug', 'DUMP_INVIDX', 'idx', 'world'), [long(i) for i in range(2, 102)])
+    env.assertEqual(env.cmd('ft.debug', 'DUMP_NUMIDX', 'idx', 'id'), [[long(i) for i in range(2, 102)]])
+    env.assertEqual(env.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't'), [['tag1', [long(i) for i in range(2, 102)]]])
 
 
 def testNumerciGCIntensive(env):
@@ -39,7 +36,7 @@ def testNumerciGCIntensive(env):
     env.assertOk(env.cmd('ft.create', 'idx', 'schema', 'id', 'numeric'))
 
     for i in range(NumberOfDocs):
-        env.assertOk(env.cmd('ft.add', 'idx', 'doc%d' % i, 1.0, 'fields', 'id', str(i)))
+        env.assertOk(env.cmd('ft.add', 'idx', 'doc%d' % i, 1.0, 'fields', 'id', '1'))
 
     for i in range(0, NumberOfDocs, 2):
         env.assertEqual(env.cmd('ft.del', 'idx', 'doc%d' % i), 1)
@@ -50,17 +47,18 @@ def testNumerciGCIntensive(env):
     res = env.cmd('ft.debug', 'DUMP_NUMIDX', 'idx', 'id')
     for r1 in res:
         for r2 in r1:
-            env.assertEqual(r2 % 2, 0)
+            # if r2 is greater then 900 its on the last block and fork GC does not clean the last block
+            env.assertTrue(r2 % 2 == 0 or r2 > 900)
 
 
 def testTagGC(env):
     if env.isCluster():
         raise unittest.SkipTest()
-    NumberOfDocs = 10
+    NumberOfDocs = 101
     env.assertOk(env.cmd('ft.create', 'idx', 'schema', 't', 'tag'))
 
     for i in range(NumberOfDocs):
-        env.assertOk(env.cmd('ft.add', 'idx', 'doc%d' % i, 1.0, 'fields', 't', str(i)))
+        env.assertOk(env.cmd('ft.add', 'idx', 'doc%d' % i, 1.0, 'fields', 't', '1'))
 
     for i in range(0, NumberOfDocs, 2):
         env.assertEqual(env.cmd('ft.del', 'idx', 'doc%d' % i), 1)
@@ -72,7 +70,8 @@ def testTagGC(env):
     res = env.cmd('ft.debug', 'DUMP_TAGIDX', 'idx', 't')
     for r1 in res:
         for r2 in r1[1]:
-            env.assertEqual(r2 % 2, 0)
+            # if r2 is greater then 100 its on the last block and fork GC does not clean the last block
+            env.assertTrue(r2 % 2 == 0 or r2 > 100)
 
 
 def testDeleteEntireBlock(env):
@@ -104,3 +103,15 @@ def testDeleteDocWithGoeField(env):
     env.expect('zrange', 'geo:idx/test2', '0', '-1').equal(['1'])
     env.expect('FT.DEL', 'idx', 'doc1').equal(1)
     env.expect('zrange', 'geo:idx/test2', '0', '-1').equal([])
+
+
+def testGCIntegrationWithRedisFork(env):
+    if env.isCluster():
+        raise unittest.SkipTest()
+    env = Env(moduleArgs='GC_POLICY FORK')
+    env.expect('FT.CONFIG', 'SET', 'FORKGC_SLEEP_BEFORE_EXIT', '4').ok()
+    env.expect('FT.CREATE', 'idx', 'SCHEMA', 'title', 'TEXT', 'SORTABLE').ok()
+    env.expect('FT.ADD', 'idx', 'doc1', 1.0, 'FIELDS', 'title', 'hello world').ok()
+    env.expect('bgsave').equal('Background saving started')
+    env.cmd('FT.DEBUG', 'GC_FORCEINVOKE', 'idx')
+    env.expect('bgsave').equal('Background saving started')

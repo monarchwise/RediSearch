@@ -38,20 +38,23 @@ extern "C" {
 typedef struct {
   const char *name;
   RedisModuleString *text;
+  FieldType indexAs;
 } DocumentField;
 
-typedef struct {
+typedef struct Document {
   RedisModuleString *docKey;
   DocumentField *fields;
-  int numFields;
+  uint32_t numFields;
   float score;
   const char *language;
   t_docId docId;
-
   const char *payload;
   size_t payloadSize;
-  int stringOwner;
+  uint32_t flags;
 } Document;
+
+// The document is "static" -- don't free the document's contents
+#define DOCUMENT_F_STATIC 0x01
 
 struct RSAddDocumentCtx;
 
@@ -70,6 +73,9 @@ typedef struct {
 } AddDocumentOptions;
 
 int AddDocumentOptions_Parse(AddDocumentOptions *opts, ArgsCursor *ac, QueryError *status);
+
+void Document_AddField(Document *d, const char *fieldname, RedisModuleString *fieldval,
+                       uint32_t typemask);
 
 /**
  * Initialize document structure with the relevant fields. numFields will allocate
@@ -140,9 +146,10 @@ void Document_Free(Document *doc);
 #define DOCUMENT_ADD_PARTIAL 0x02
 #define DOCUMENT_ADD_NOSAVE 0x04
 #define DOCUMENT_ADD_CURTHREAD 0x08  // Perform operation in main thread
+#define DOCUMENT_ADD_NOCREATE 0x10   // Don't create document if not exist (replace ONLY)
 
 struct ForwardIndex;
-union FieldData;
+struct FieldIndexerData;
 
 // The context has had its forward entries merged in the merge table. We can
 // skip merging its tokens
@@ -163,6 +170,9 @@ union FieldData;
 // Don't block/unblock the client when indexing. This is the case when the
 // operation is being done from within the context of AOF
 #define ACTX_F_NOBLOCK 0x20
+
+// Document is entirely empty (no sortables, indexables)
+#define ACTX_F_EMPTY 0x40
 
 struct DocumentIndexer;
 
@@ -197,14 +207,18 @@ typedef struct RSAddDocumentCtx {
   // Old document data. Contains sortables
   RSDocumentMetadata *oldMd;
 
+  // New flags to assign to the document
+  RSDocumentFlags docFlags;
+
   // Scratch space used by per-type field preprocessors (see the source)
-  union FieldData *fdatas;
+  struct FieldIndexerData *fdatas;
   QueryError status;     // Error message is placed here if there is an error during processing
   uint32_t totalTokens;  // Number of tokens, used for offset vector
   uint32_t specFlags;    // Cached index flags
   uint8_t options;       // Indexing options - i.e. DOCUMENT_ADD_xxx
   uint8_t stateFlags;    // Indexing state, ACTX_F_xxx
   DocumentAddCompleted donecb;
+  void *donecbData;
 } RSAddDocumentCtx;
 
 #define AddDocumentCtx_IsBlockable(aCtx) (!((aCtx)->stateFlags & ACTX_F_NOBLOCK))
@@ -275,10 +289,12 @@ int Document_EvalExpression(RedisSearchCtx *sctx, RedisModuleString *key, const 
 int Redis_LoadDocumentEx(RedisSearchCtx *ctx, RedisModuleString *key, const char **fields,
                          size_t nfields, Document *doc, RedisModuleKey **keyp);
 
+// Don't create document if it does not exist. Replace only
+#define REDIS_SAVEDOC_NOCREATE 0x01
 /**
  * Save a document in the index. Used for returning contents in search results.
  */
-int Redis_SaveDocument(RedisSearchCtx *ctx, Document *doc, QueryError *status);
+int Redis_SaveDocument(RedisSearchCtx *ctx, Document *doc, int options, QueryError *status);
 
 /* Serialzie the document's fields to a redis client */
 int Document_ReplyFields(RedisModuleCtx *ctx, Document *doc);

@@ -5,14 +5,16 @@
 #include "../ext/default.h"
 #include <gtest/gtest.h>
 
+int myRegisterFunc(RSExtensionCtx *ctx);
+
 class ExtTest : public ::testing::Test {
  protected:
   virtual void SetUp(void) {
     Extensions_Init();
+    Extension_Load("testung", myRegisterFunc);
   }
 
   virtual void TearDown(void) {
-    Extensions_Free();
   }
 };
 
@@ -29,12 +31,12 @@ static const char *getExtensionPath(void) {
 }
 
 /* Calculate sum(TF-IDF)*document score for each result */
-double myScorer(ScoringFunctionArgs *ctx, RSIndexResult *h, RSDocumentMetadata *dmd,
-                double minScore) {
+static double myScorer(const ScoringFunctionArgs *ctx, const RSIndexResult *h,
+                       const RSDocumentMetadata *dmd, double minScore) {
   return 3.141;
 }
 
-int myExpander(RSQueryExpanderCtx *ctx, RSToken *token) {
+static int myExpander(RSQueryExpanderCtx *ctx, RSToken *token) {
   ctx->ExpandToken(ctx, strdup("foo"), 3, 0x00ff);
   return REDISMODULE_OK;
 }
@@ -66,7 +68,6 @@ int myRegisterFunc(RSExtensionCtx *ctx) {
 
 TEST_F(ExtTest, testRegistration) {
   numFreed = 0;
-  ASSERT_TRUE(REDISEARCH_OK == Extension_Load("testung", myRegisterFunc));
 
   RSQueryExpanderCtx qexp;
   ExtQueryExpanderCtx *qx = Extensions_GetQueryExpander(&qexp, EXPANDER_NAME);
@@ -114,7 +115,6 @@ TEST_F(ExtTest, testDynamicLoading) {
 
 TEST_F(ExtTest, testQueryExpander) {
   numFreed = 0;
-  ASSERT_TRUE(REDISEARCH_OK == Extension_Load("testung", myRegisterFunc));
 
   const char *qt = "hello world";
   RSSearchOptions opts = {0};
@@ -134,20 +134,20 @@ TEST_F(ExtTest, testQueryExpander) {
   ASSERT_EQ(qast.numTokens, 4);
 
   QueryNode *n = qast.root;
-  ASSERT_TRUE(n->pn.children[0]->type == QN_UNION);
-  ASSERT_STREQ("hello", n->pn.children[0]->un.children[0]->tn.str);
-  ASSERT_TRUE(n->pn.children[0]->un.children[0]->tn.expanded == 0);
-  ASSERT_STREQ("foo", n->pn.children[0]->un.children[1]->tn.str);
-  ASSERT_EQ(0x00FF, n->pn.children[0]->un.children[1]->tn.flags);
+  ASSERT_EQ(QN_UNION, n->children[0]->type);
+  ASSERT_STREQ("hello", n->children[0]->children[0]->tn.str);
+  ASSERT_EQ(0, n->children[0]->children[0]->tn.expanded);
+  ASSERT_STREQ("foo", n->children[0]->children[1]->tn.str);
+  ASSERT_EQ(0x00FF, n->children[0]->children[1]->tn.flags);
 
-  ASSERT_TRUE(n->pn.children[0]->un.children[1]->tn.expanded != 0);
+  ASSERT_NE(0, n->children[0]->children[1]->tn.expanded);
 
-  ASSERT_TRUE(n->pn.children[1]->type == QN_UNION);
-  ASSERT_STREQ("world", n->pn.children[1]->un.children[0]->tn.str);
-  ASSERT_STREQ("foo", n->pn.children[1]->un.children[1]->tn.str);
+  ASSERT_EQ(QN_UNION, n->children[1]->type);
+  ASSERT_STREQ("world", n->children[1]->children[0]->tn.str);
+  ASSERT_STREQ("foo", n->children[1]->children[1]->tn.str);
 
-  RSQueryTerm *qtr = NewQueryTerm(&n->pn.children[1]->un.children[1]->tn, 1);
-  ASSERT_STREQ(qtr->str, n->pn.children[1]->un.children[1]->tn.str);
+  RSQueryTerm *qtr = NewQueryTerm(&n->children[1]->children[1]->tn, 1);
+  ASSERT_STREQ(qtr->str, n->children[1]->children[1]->tn.str);
   ASSERT_EQ(0x00FF, qtr->flags);
 
   Term_Free(qtr);

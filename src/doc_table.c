@@ -12,14 +12,15 @@
 
 /* Creates a new DocTable with a given capacity */
 DocTable NewDocTable(size_t cap, size_t max_size) {
-  return (DocTable){.size = 1,
-                    .cap = cap,
-                    .maxDocId = 0,
-                    .memsize = 0,
-                    .sortablesSize = 0,
-                    .maxSize = max_size,
-                    .buckets = rm_calloc(cap, sizeof(DMDChain)),
-                    .dim = NewDocIdMap()};
+  DocTable ret = {.size = 1,
+                  .cap = cap,
+                  .maxDocId = 0,
+                  .memsize = 0,
+                  .sortablesSize = 0,
+                  .maxSize = max_size,
+                  .dim = NewDocIdMap()};
+  ret.buckets = rm_calloc(cap, sizeof(*ret.buckets));
+  return ret;
 }
 
 static inline uint32_t DocTable_GetBucket(const DocTable *t, t_docId docId) {
@@ -30,25 +31,17 @@ static inline int DocTable_ValidateDocId(const DocTable *t, t_docId docId) {
   return docId != 0 && docId <= t->maxDocId;
 }
 
-/* Get the metadata for a doc Id from the DocTable.
- *  If docId is not inside the table, we return NULL */
-
-int DMDChain_IsEmpty(const DMDChain *dmdChain) {
-  return !dmdChain->last;
-}
-
 RSDocumentMetadata *DocTable_Get(const DocTable *t, t_docId docId) {
   if (!DocTable_ValidateDocId(t, docId)) {
     return NULL;
   }
   uint32_t bucketIndex = DocTable_GetBucket(t, docId);
   DMDChain *dmdChain = &t->buckets[bucketIndex];
-  RSDocumentMetadata *currDmd = dmdChain->first;
-  while (currDmd) {
-    if (currDmd->id == docId) {
-      return currDmd;
+  DLLIST2_FOREACH(it, &dmdChain->lroot) {
+    RSDocumentMetadata *dmd = DLLIST2_ITEM(it, RSDocumentMetadata, llnode);
+    if (dmd->id == docId) {
+      return dmd;
     }
-    currDmd = currDmd->next;
   }
   return NULL;
 }
@@ -62,7 +55,8 @@ int DocTable_Exists(const DocTable *t, t_docId docId) {
   if (chain == NULL) {
     return 0;
   }
-  for (const RSDocumentMetadata *md = chain->first; md; md = md->next) {
+  DLLIST2_FOREACH(it, &chain->lroot) {
+    const RSDocumentMetadata *md = DLLIST2_ITEM(it, RSDocumentMetadata, llnode);
     if (md->id == docId && !(md->flags & Document_Deleted)) {
       return 1;
     }
@@ -90,11 +84,10 @@ static inline void DocTable_Set(DocTable *t, t_docId docId, RSDocumentMetadata *
     t->cap += 1 + (t->cap ? MIN(t->cap / 2, 1024 * 1024) : 1);
     t->cap = MIN(t->cap, t->maxSize);  // make sure we do not excised maxSize
     t->cap = MAX(t->cap, bucket + 1);  // docs[bucket] needs to be valid, so t->cap > bucket
-
     t->buckets = rm_realloc(t->buckets, t->cap * sizeof(DMDChain));
     for (; oldcap < t->cap; oldcap++) {
-      t->buckets[oldcap].first = NULL;
-      t->buckets[oldcap].last = NULL;
+      t->buckets[oldcap].lroot.head = NULL;
+      t->buckets[oldcap].lroot.tail = NULL;
     }
   }
 
@@ -102,14 +95,7 @@ static inline void DocTable_Set(DocTable *t, t_docId docId, RSDocumentMetadata *
   DMD_Incref(dmd);
 
   // Adding the dmd to the chain
-  if (DMDChain_IsEmpty(chain)) {
-    chain->first = chain->last = dmd;
-  } else {
-    chain->last->next = dmd;
-    dmd->prev = chain->last;
-    dmd->next = NULL;
-    chain->last = dmd;
-  }
+  dllist2_append(&chain->lroot, &dmd->llnode);
 }
 
 /** Get the docId of a key if it exists in the table, or 0 if it doesnt */
@@ -280,14 +266,14 @@ void DMD_Free(RSDocumentMetadata *md) {
 void DocTable_Free(DocTable *t) {
   for (int i = 0; i < t->cap; ++i) {
     DMDChain *chain = &t->buckets[i];
-    if (DMDChain_IsEmpty(chain)) {
+    if (DLLIST2_IS_EMPTY(&chain->lroot)) {
       continue;
     }
-    RSDocumentMetadata *md = chain->first;
-    while (md) {
-      RSDocumentMetadata *next = md->next;
+    DLLIST2_node *nn = chain->lroot.head;
+    while (nn) {
+      RSDocumentMetadata *md = DLLIST2_ITEM(nn, RSDocumentMetadata, llnode);
+      nn = nn->next;
       DMD_Free(md);
-      md = next;
     }
   }
   rm_free(t->buckets);
@@ -297,23 +283,7 @@ void DocTable_Free(DocTable *t) {
 static void DocTable_DmdUnchain(DocTable *t, RSDocumentMetadata *md) {
   uint32_t bucketIndex = DocTable_GetBucket(t, md->id);
   DMDChain *dmdChain = &t->buckets[bucketIndex];
-
-  if (dmdChain->first == md) {
-    dmdChain->first = md->next;
-  }
-
-  if (dmdChain->last == md) {
-    dmdChain->last = md->prev;
-  }
-
-  if (md->prev) {
-    md->prev->next = md->next;
-  }
-  if (md->next) {
-    md->next->prev = md->prev;
-  }
-  md->next = NULL;
-  md->prev = NULL;
+  dllist2_delete(&dmdChain->lroot, &md->llnode);
 }
 
 int DocTable_Delete(DocTable *t, const char *s, size_t n) {
@@ -327,6 +297,7 @@ int DocTable_Delete(DocTable *t, const char *s, size_t n) {
 
 RSDocumentMetadata *DocTable_Pop(DocTable *t, const char *s, size_t n) {
   t_docId docId = DocIdMap_Get(&t->dim, s, n);
+
   if (docId && docId <= t->maxDocId) {
 
     RSDocumentMetadata *md = DocTable_Get(t, docId);
@@ -353,12 +324,11 @@ void DocTable_RdbSave(DocTable *t, RedisModuleIO *rdb) {
 
   uint32_t elements_written = 0;
   for (uint32_t i = 0; i < t->cap; ++i) {
-    if (DMDChain_IsEmpty(&t->buckets[i])) {
+    if (DLLIST2_IS_EMPTY(&t->buckets[i].lroot)) {
       continue;
     }
-    RSDocumentMetadata *dmd = t->buckets[i].first;
-    while (dmd) {
-
+    DLLIST2_FOREACH(it, &t->buckets[i].lroot) {
+      const RSDocumentMetadata *dmd = DLLIST2_ITEM(it, RSDocumentMetadata, llnode);
       RedisModule_SaveStringBuffer(rdb, dmd->keyPtr, sdslen(dmd->keyPtr));
       RedisModule_SaveUnsigned(rdb, dmd->id);
       RedisModule_SaveUnsigned(rdb, dmd->flags);
@@ -386,19 +356,32 @@ void DocTable_RdbSave(DocTable *t, RedisModuleIO *rdb) {
         Buffer_Free(&tmp);
       }
       ++elements_written;
-      dmd = dmd->next;
     }
   }
   assert(elements_written + 1 == t->size);
 }
 
 void DocTable_RdbLoad(DocTable *t, RedisModuleIO *rdb, int encver) {
+  long long deletedElements = 0;
   t->size = RedisModule_LoadUnsigned(rdb);
   t->maxDocId = RedisModule_LoadUnsigned(rdb);
   if (encver >= INDEX_MIN_COMPACTED_DOCTABLE_VERSION) {
     t->maxSize = RedisModule_LoadUnsigned(rdb);
   } else {
     t->maxSize = MIN(RSGlobalConfig.maxDocTableSize, t->maxDocId);
+  }
+
+  if (t->maxDocId > t->maxSize) {
+    /**
+     * If the maximum doc id is greater than the maximum cap size
+     * then it means there is a possibility that any index under maxId can
+     * be accessed. However, it is possible that this bucket does not have
+     * any documents inside it (and thus might not be populated below), but
+     * could still be accessed for simple queries (e.g. get, exist). Ensure
+     * we don't have to rely on Set/Put to ensure the doc table array.
+     */
+    t->cap = t->maxSize;
+    t->buckets = rm_calloc(t->cap, sizeof(*t->buckets));
   }
 
   for (size_t i = 1; i < t->size; i++) {
@@ -430,11 +413,15 @@ void DocTable_RdbLoad(DocTable *t, RedisModuleIO *rdb, int encver) {
     dmd->score = RedisModule_LoadFloat(rdb);
     dmd->payload = NULL;
     // read payload if set
-    if (dmd->flags & Document_HasPayload) {
-      dmd->payload = RedisModule_Alloc(sizeof(RSPayload));
-      dmd->payload->data = RedisModule_LoadStringBuffer(rdb, &dmd->payload->len);
-      dmd->payload->len--;
-      t->memsize += dmd->payload->len + sizeof(RSPayload);
+    if ((dmd->flags & Document_HasPayload)) {
+      if (!(dmd->flags & Document_Deleted)) {
+        dmd->payload = RedisModule_Alloc(sizeof(RSPayload));
+        dmd->payload->data = RedisModule_LoadStringBuffer(rdb, &dmd->payload->len);
+        dmd->payload->len--;
+        t->memsize += dmd->payload->len + sizeof(RSPayload);
+      } else if ((dmd->flags & Document_Deleted) && (encver == INDEX_MIN_EXPIRE_VERSION)) {
+        RedisModule_LoadStringBuffer(rdb, NULL);  // throw this string to garbage
+      }
     }
     dmd->sortVector = NULL;
     if (dmd->flags & Document_HasSortVector) {
@@ -452,6 +439,7 @@ void DocTable_RdbLoad(DocTable *t, RedisModuleIO *rdb, int encver) {
     }
 
     if (dmd->flags & Document_Deleted) {
+      ++deletedElements;
       DMD_Free(dmd);
     } else {
       DocIdMap_Put(&t->dim, dmd->keyPtr, sdslen(dmd->keyPtr), dmd->id);
@@ -459,6 +447,7 @@ void DocTable_RdbLoad(DocTable *t, RedisModuleIO *rdb, int encver) {
       t->memsize += sizeof(RSDocumentMetadata) + len;
     }
   }
+  t->size -= deletedElements;
 }
 
 DocIdMap NewDocIdMap() {

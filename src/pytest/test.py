@@ -53,7 +53,7 @@ def testConditionalUpdate(env):
                                'IF', '@bar > 42', 'FIELDS', 'bar', '15'))
 
 def testUnionIdList(env):
-    # Regression test for https://github.com/RedisLabsModules/RediSearch/issues/306
+    # Regression test for https://github.com/RediSearch/RediSearch/issues/306
     r = env
     N = 100
     env.assertOk(r.execute_command(
@@ -62,6 +62,9 @@ def testUnionIdList(env):
         "ft.add", "test", "1", "1", "FIELDS", "tags", "alberta", "waypoint", "-113.524,53.5244"))
     env.assertOk(r.execute_command(
         "ft.add", "test", "2", "1", "FIELDS", "tags", "ontario", "waypoint", "-79.395,43.661667"))
+    
+    print r.cmd('ft.search', 'test', '@tags:{ontario}')
+
     res = r.execute_command(
         'ft.search', 'test', "@waypoint:[-113.52 53.52 20 mi]|@tags:{ontario}", 'nocontent')
     env.assertEqual(res, [2, '2', '1'])
@@ -240,6 +243,16 @@ def testGet(env):
     env.assertEqual(len(rr), 100)
     for res in rr:
         env.assertIsNone(res)
+    
+    # Verify that when a document is deleted, GET returns NULL
+    r.cmd('ft.del', 'idx', 'doc10') # But we still keep the document
+    r.cmd('ft.del', 'idx', 'doc11')
+    res = r.cmd('ft.get', 'idx', 'doc10')
+    r.assertEqual(None, res)
+    res = r.cmd('ft.mget', 'idx', 'doc10', 'doc11', 'doc12')
+    r.assertIsNone(res[0])
+    r.assertIsNone(res[1])
+    r.assertTrue(not not res[2])
 
 def testDelete(env):
     r = env
@@ -449,6 +462,9 @@ def testOptional(env):
     env.assertEqual([3L, 'doc3', 'doc2', 'doc1'], res)
     res = r.execute_command(
         'ft.search', 'idx', 'hello ~world ~werld', 'nocontent', 'scorer', 'DISMAX')
+    env.assertEqual([3L, 'doc3', 'doc2', 'doc1'], res)
+    res = r.execute_command(
+        'ft.search', 'idx', '~world ~werld hello', 'nocontent', 'scorer', 'DISMAX')
     env.assertEqual([3L, 'doc3', 'doc2', 'doc1'], res)
 
 def testExplain(env):
@@ -862,6 +878,7 @@ def testGeo(env):
         env.assertEqual(len(hotels), res[0])
 
         res = gsearch('hilton', "-0.1757", "51.5156", '1')
+        print res
         env.assertEqual(3, res[0])
         env.assertEqual('hotel2', res[5])
         env.assertEqual('hotel21', res[3])
@@ -900,6 +917,38 @@ def testGeo(env):
         res2 = gsearch_inline(
             'heathrow', -0.44155, 51.45865, '5', 'km')
         env.assertListEqual(res, res2)
+
+def testGeoDeletion(env):
+    if env.is_cluster():
+        raise unittest.SkipTest()
+        # Can't properly test if deleted on cluster
+
+    env.cmd('ft.create', 'idx', 'schema',
+            'g1', 'geo', 'g2', 'geo', 't1', 'text')
+    env.cmd('ft.add', 'idx', 'doc1', 1.0, 'fields',
+            'g1', "-0.1757,51.5156",
+            'g2', "-0.1757,51.5156",
+            't1', "hello")
+    env.cmd('ft.add', 'idx', 'doc2', 1.0, 'fields',
+            'g1', "-0.1757,51.5156",
+            'g2', "-0.1757,51.5156",
+            't1', "hello")
+    
+    # keys are: "geo:idx/g1" and "geo:idx/g2"
+    env.assertEqual(2, env.cmd('zcard', 'geo:idx/g1'))
+    env.assertEqual(2, env.cmd('zcard', 'geo:idx/g2'))
+    
+    # Remove the first doc
+    env.cmd('ft.del', 'idx', 'doc1')
+    env.assertEqual(1, env.cmd('zcard', 'geo:idx/g1'))
+    env.assertEqual(1, env.cmd('zcard', 'geo:idx/g2'))
+    
+    # Replace the other one:
+    env.cmd('ft.add', 'idx', 'doc2', 1.0,
+            'replace', 'fields',
+            't1', 'just text here')
+    env.assertEqual(0, env.cmd('zcard', 'geo:idx/g1'))
+    env.assertEqual(0, env.cmd('zcard', 'geo:idx/g2'))
 
 def testAddHash(env):
     if env.is_cluster():
@@ -1282,6 +1331,9 @@ def testPayload(env):
 
 def testGarbageCollector(env):
     env.skipOnCluster()
+    if env.moduleArgs is not None and 'GC_POLICY FORK' in env.moduleArgs:
+        # this test is not relevent for fork gc cause its not cleaning the last block
+        raise unittest.SkipTest()
     N = 100
     r = env
     env.assertOk(r.execute_command(
@@ -1335,8 +1387,11 @@ def testGarbageCollector(env):
         env.assertEqual([0], res)
 
 def testReturning(env):
-    env.assertCmdOk('ft.create', 'idx', 'schema', 'f1',
-                     'text', 'f2', 'text', 'n1', 'numeric', 'f3', 'text')
+    env.assertCmdOk('ft.create', 'idx', 'schema',
+                     'f1', 'text',
+                     'f2', 'text',
+                     'n1', 'numeric', 'sortable',
+                     'f3', 'text')
     for i in range(10):
         env.assertCmdOk('ft.add', 'idx', 'DOC_{0}'.format(i), 1.0, 'fields',
                          'f2', 'val2', 'f1', 'val1', 'f3', 'val3',
@@ -1360,18 +1415,22 @@ def testReturning(env):
             env.assertEqual(field, fields[0])
             env.assertTrue(docname.startswith('DOC_'))
 
+    # Test that we don't return SORTBY fields if they weren't specified
+    # also in RETURN
+    res = env.cmd('ft.search', 'idx', 'val*', 'return', 1, 'f1',
+        'sortby', 'n1', 'ASC')
+    row = res[2]
+    # get the first result
+    env.assertEqual(['f1', 'val1'], row)
+
     # Test when field is not found
-    # Note: DISABLED because returning fields not in schema is now an ERROR
-    # res = env.cmd('ft.search', 'idx', 'val*', 'return', 1, 'nonexist')
-    # env.assertEqual(21, len(res))
-    # env.assertEqual(10, res[0])
-    # for pair in grouper(res[1:], 2):
-    #     _, pair = pair
-    #     env.assertEqual(None, pair[1])
+    res = env.cmd('ft.search', 'idx', 'val*', 'return', 1, 'nonexist')
+    env.assertEqual(21, len(res))
+    env.assertEqual(10, res[0])
 
     # # Test that we don't crash if we're given the wrong number of fields
-    # with env.assertResponseError():
-    #     res = env.cmd('ft.search', 'idx', 'val*', 'return', 700, 'nonexist')
+    with env.assertResponseError():
+        res = env.cmd('ft.search', 'idx', 'val*', 'return', 700, 'nonexist')
 
 def _test_create_options_real(env, *options):
     options = [x for x in options if x]
@@ -1391,11 +1450,11 @@ def _test_create_options_real(env, *options):
             i), 0.5, 'fields', 'f1', 'value for {}'.format(i))
 
     # Query
-    res = env.cmd('ft.search', 'idx', "value for 3")
-    if not has_offsets:
-        env.assertIsNone(res)
-    else:
-        env.assertIsNotNone(res)
+#     res = env.cmd('ft.search', 'idx', "value for 3")
+#     if not has_offsets:
+#         env.assertIsNone(res)
+#     else:
+#         env.assertIsNotNone(res)
 
     # Frequencies:
     env.assertCmdOk('ft.add', 'idx', 'doc100',
@@ -1422,7 +1481,7 @@ def _test_create_options_real(env, *options):
 def testCreationOptions(env):
     from itertools import combinations
     for x in range(1, 5):
-        for combo in combinations(('NOOFSETS', 'NOFREQS', 'NOFIELDS', ''), x):
+        for combo in combinations(('NOOFFSETS', 'NOFREQS', 'NOFIELDS', ''), x):
             _test_create_options_real(env, *combo)
 
 def testInfoCommand(env):
@@ -1837,6 +1896,13 @@ def testIssue366_2(env):
     for _ in env.retry_with_reload():
         pass  #
 
+def testIssue654(env):
+    # Crashes during FILTER
+    env.cmd('ft.create', 'idx', 'schema', 'id', 'numeric')
+    env.cmd('ft.add', 'idx', 1, 1, 'fields', 'id', 1)
+    env.cmd('ft.add', 'idx', 2, 1, 'fields', 'id', 2)
+    res = env.cmd('ft.search', 'idx', '*', 'filter', '@version', 0, 2)
+
 def testReplaceReload(env):
     env.cmd('FT.CREATE', 'idx2', 'SCHEMA', 'textfield', 'TEXT', 'numfield', 'NUMERIC')
     # Create a document and then replace it.
@@ -1895,11 +1961,81 @@ def testIssue446(env):
     rv = env.cmd('ft.search', 'myIdx', 'hello', 'limit', '0', '0')
     env.assertEqual([1], rv)
 
+    # Related - issue 635
+    env.cmd('ft.add', 'myIdx', 'doc2', '1.0', 'fields', 'title', 'hello')
+    rv = env.cmd('ft.search', 'myIdx', 'hello', 'limit', '0', '0')
+    env.assertEqual([2], rv)
+
+
 def testTimeoutSettings(env):
     env.cmd('ft.create', 'idx', 'schema', 't1', 'text')
     env.expect('ft.search', 'idx', '*', 'ON_TIMEOUT', 'BLAHBLAH').raiseError()
     env.expect('ft.search', 'idx', '*', 'ON_TIMEOUT', 'RETURN').notRaiseError()
     env.expect('ft.search', 'idx', '*', 'ON_TIMEOUT', 'FAIL').notRaiseError()
+
+def testAlias(env):
+    env.cmd('ft.create', 'idx', 'schema', 't1', 'text')
+    env.cmd('ft.create', 'idx2', 'schema', 't1', 'text')
+
+    env.cmd('ft.aliasAdd', 'myIndex', 'idx')
+    env.cmd('ft.add', 'myIndex', 'doc1', 1.0, 'fields', 't1', 'hello')
+    r = env.cmd('ft.search', 'idx', 'hello')
+    env.assertEqual([1, 'doc1', ['t1', 'hello']], r)
+    r2 = env.cmd('ft.search', 'myIndex', 'hello')
+    env.assertEqual(r, r2)
+
+    # try to add the same alias again; should be an error
+    env.expect('ft.aliasAdd', 'myIndex', 'idx2').raiseError()
+    env.expect('ft.aliasAdd', 'alias2', 'idx').notRaiseError()
+    # now delete the index
+    env.cmd('ft.drop', 'myIndex')
+
+    # index list should be cleared now. This can be tested by trying to alias
+    # the old alias to different index
+    env.cmd('ft.aliasAdd', 'myIndex', 'idx2')
+    env.cmd('ft.aliasAdd', 'alias2', 'idx2')
+    env.cmd('ft.add', 'myIndex', 'doc2', 1.0, 'fields', 't1', 'hello')
+    r = env.cmd('ft.search', 'alias2', 'hello')
+    env.assertEqual([1L, 'doc2', ['t1', 'hello']], r)
+
+    # check that aliasing one alias to another returns an error. This will
+    # end up being confusing
+    env.expect('ft.aliasAdd', 'alias3', 'myIndex').raiseError()
+
+    # check that deleting the alias works as expected
+    env.expect('ft.aliasDel', 'myIndex').notRaiseError()
+    env.expect('ft.search', 'myIndex', 'foo').raiseError()
+    
+    # create a new index and see if we can use the old name
+    env.cmd('ft.create', 'idx3', 'schema', 't1', 'text')
+    env.cmd('ft.add', 'idx3', 'doc3', 1.0, 'fields', 't1', 'foo')
+    env.cmd('ft.aliasAdd', 'myIndex', 'idx3')
+    # also, check that this works in rdb save
+    for _ in env.retry_with_rdb_reload():
+        r = env.cmd('ft.search', 'myIndex', 'foo')
+        env.assertEqual([1L, 'doc3', ['t1', 'foo']], r)
+
+    # Check that we can move an alias from one index to another
+    env.cmd('ft.aliasUpdate', 'myIndex', 'idx2')
+    r = env.cmd('ft.search', 'myIndex', "hello")
+    env.assertEqual([1L, 'doc2', ['t1', 'hello']], r)
+
+    # Test that things like ft.get, ft.aggregate, etc. work
+    r = env.cmd('ft.get', 'myIndex', 'doc2')
+    env.assertEqual(['t1', 'hello'], r)
+
+    r = env.cmd('ft.aggregate', 'myIndex', 'hello', 'LOAD', '1', '@t1')
+    env.assertEqual([1, ['t1', 'hello']], r)
+
+    r = env.cmd('ft.del', 'myIndex', 'doc2')
+    env.assertEqual(1, r)
+
+def testNoCreate(env):
+    env.cmd('ft.create', 'idx', 'schema', 'f1', 'text')
+    env.expect('ft.add', 'idx', 'doc1', 1, 'nocreate', 'fields', 'f1', 'hello').raiseError()
+    env.expect('ft.add', 'idx', 'doc1', 1, 'replace', 'nocreate', 'fields', 'f1', 'hello').raiseError()
+    env.expect('ft.add', 'idx', 'doc1', 1, 'replace', 'fields', 'f1', 'hello').notRaiseError()
+    env.expect('ft.add', 'idx', 'doc1', 1, 'replace', 'nocreate', 'fields', 'f1', 'world').notRaiseError()
 
 # Standalone functionality
 def testIssue484(env):
@@ -1945,6 +2081,62 @@ def testIssue501(env):
         'TERMS', 'INCLUDE', 'slang', 'TERMS', 'EXCLUDE', 'slang')
     env.assertEqual("qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq", rv[0][1])
     env.assertEqual([], rv[0][2])
+
+def testIssue589(env):
+    env.cmd('FT.CREATE', 'incidents', 'SCHEMA', 'report', 'TEXT')
+    env.cmd('FT.ADD', 'incidents', 'doc1', 1.0, 'FIELDS', 'report', 'report content')
+    env.expect('FT.SPELLCHECK', 'incidents', 'report :').error().contains("Syntax error at offset")
+
+def testIssue621(env):
+    env.expect('ft.create', 'test', 'SCHEMA', 'uuid', 'TAG', 'title', 'TEXT').equal('OK')
+    env.expect('ft.add', 'test', 'a', '1', 'REPLACE', 'PARTIAL', 'FIELDS', 'uuid', 'foo', 'title', 'bar').equal('OK')
+    env.expect('ft.add', 'test', 'a', '1', 'REPLACE', 'PARTIAL', 'FIELDS', 'title', 'bar').equal('OK')
+    env.expect('ft.search', 'test', '@uuid:{foo}').equal([1L, 'a', ['uuid', 'foo', 'title', 'bar']])
+
+# Server crash on doc names that conflict with index keys #666
+def testIssue666(env):
+    env.cmd('ft.create', 'foo', 'schema', 'bar', 'text')
+    env.cmd('ft.add', 'foo', 'mydoc', 1, 'fields', 'bar', 'one two three')
+
+    # crashes here
+    with env.assertResponseError():
+        env.cmd('ft.add', 'foo', 'ft:foo/two', '1', 'fields', 'bar', 'four five six')
+    # try with replace:
+    with env.assertResponseError():
+        env.cmd('ft.add', 'foo', 'ft:foo/two', '1', 'REPLACE',
+            'FIELDS', 'bar', 'four five six')
+    with env.assertResponseError():
+        env.cmd('ft.add', 'foo', 'idx:foo', '1', 'REPLACE',
+            'FIELDS', 'bar', 'four five six')
+
+    env.cmd('ft.add', 'foo', 'mydoc1', 1, 'fields', 'bar', 'four five six')
+
+# 127.0.0.1:6379> flushdb
+# OK
+# 127.0.0.1:6379> ft.create foo SCHEMA bar text
+# OK
+# 127.0.0.1:6379> ft.add foo mydoc 1 FIELDS bar "one two three"
+# OK
+# 127.0.0.1:6379> keys *
+# 1) "mydoc"
+# 2) "ft:foo/one"
+# 3) "idx:foo"
+# 4) "ft:foo/two"
+# 5) "ft:foo/three"
+# 127.0.0.1:6379> ft.add foo "ft:foo/two" 1 FIELDS bar "four five six"
+# Could not connect to Redis at 127.0.0.1:6379: Connection refused
+
+
+def testOptionalFilter(env):
+    env.cmd('ft.create', 'idx', 'schema', 't1', 'text')
+    for x in range(100):
+        env.cmd('ft.add', 'idx', 'doc_{}'.format(x), 1, 'fields', 't1', 'hello world word{}'.format(x))
+
+    print env.cmd('ft.explain', 'idx', '(~@t1:word20)')
+    # print(r)
+
+    r = env.cmd('ft.search', 'idx', '~(word20 => {$weight: 2.0})')
+    print(r)
 
 def grouper(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
